@@ -1,0 +1,9 @@
+{
+  "name": "cordova",
+  "version": "2.7.0",
+  "ignore": [
+    "**/.*",
+    "node_modules",
+    "components"
+  ]
+}
