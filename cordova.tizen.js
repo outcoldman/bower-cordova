@@ -1,5 +1,5 @@
 // Platform: tizen
-// 2.8.0-0-g6208c95
+// 2.9.0-0-g83dc4bd
 /*
  Licensed to the Apache Software Foundation (ASF) under one
  or more contributor license agreements.  See the NOTICE file
@@ -19,7 +19,7 @@
  under the License.
 */
 ;(function() {
-var CORDOVA_JS_BUILD_LABEL = '2.8.0-0-g6208c95';
+var CORDOVA_JS_BUILD_LABEL = '2.9.0-0-g83dc4bd';
 // file: lib/scripts/require.js
 
 var require,
@@ -2937,9 +2937,31 @@ FileWriter.prototype.abort = function() {
 /**
  * Writes data to the file
  *
- * @param text to be written
+ * @param data text or blob to be written
  */
-FileWriter.prototype.write = function(text) {
+FileWriter.prototype.write = function(data) {
+
+    var isBinary = false;
+
+    // If we don't have Blob or ArrayBuffer support, don't bother.
+    if (typeof window.Blob !== 'undefined' && typeof window.ArrayBuffer !== 'undefined') {
+
+        // Check to see if the incoming data is a blob
+        if (data instanceof Blob) {
+            var that=this;
+            var fileReader = new FileReader();
+            fileReader.onload = function() {
+                // Call this method again, with the arraybuffer as argument
+                FileWriter.prototype.write.call(that, this.result);
+            };
+            fileReader.readAsArrayBuffer(data);
+            return;
+        }
+
+        // Mark data type for safer transport over the binary bridge
+        isBinary = (data instanceof ArrayBuffer);
+    }
+
     // Throw an exception if we are already writing a file
     if (this.readyState === FileWriter.WRITING) {
         throw new FileError(FileError.INVALID_STATE_ERR);
@@ -3005,7 +3027,7 @@ FileWriter.prototype.write = function(text) {
             if (typeof me.onwriteend === "function") {
                 me.onwriteend(new ProgressEvent("writeend", {"target":me}));
             }
-        }, "File", "write", [this.fileName, text, this.position]);
+        }, "File", "write", [this.fileName, data, this.position, isBinary]);
 };
 
 /**
@@ -3190,6 +3212,9 @@ InAppBrowser.prototype = {
     },
     close: function (eventname) {
         exec(null, null, "InAppBrowser", "close", []);
+    },
+    show: function (eventname) {
+      exec(null, null, "InAppBrowser", "show", []);
     },
     addEventListener: function (eventname,f) {
         if (eventname in this.channels) {
@@ -5114,14 +5139,13 @@ module.exports = globalization;
 
 });
 
-// file: lib/common/plugin/globalization/symbols.js
+// file: lib/tizen/plugin/globalization/symbols.js
 define("cordova/plugin/globalization/symbols", function(require, exports, module) {
 
 
 var modulemapper = require('cordova/modulemapper');
 
-modulemapper.clobbers('cordova/plugin/globalization', 'navigator.globalization');
-modulemapper.clobbers('cordova/plugin/GlobalizationError', 'GlobalizationError');
+modulemapper.merges('cordova/plugin/tizen/Globalization', 'navigator.globalization');
 
 });
 
@@ -5785,6 +5809,16 @@ var splashscreen = {
 };
 
 module.exports = splashscreen;
+
+});
+
+// file: lib/tizen/plugin/splashscreen/symbol.js
+define("cordova/plugin/splashscreen/symbol", function(require, exports, module) {
+
+
+var modulemapper = require('cordova/modulemapper');
+
+modulemapper.merges('cordova/plugin/tizen/SplashScreen', 'splashscreen'); /// is that correct???  PPL
 
 });
 
@@ -6983,9 +7017,8 @@ var channel = require('cordova/channel');
 //channel.waitForInitialization('onCordovaInfoReady');
 
 function Device() {
-    this.version = null;
+    this.version = "2.1.0"; // waiting a working solution of the security error see below
     this.uuid = null;
-    this.name = null;
     this.model = null;
     this.cordova = CORDOVA_JS_BUILD_LABEL;
     this.platform = "Tizen";
@@ -6994,16 +7027,14 @@ function Device() {
 }
 
 Device.prototype.getDeviceInfo = function() {
-    
+
     var deviceCapabilities =  tizen.systeminfo.getCapabilities();
-    
+
     if (deviceCapabilities) {
-        
-        this.version = deviceCapabilities.platformVersion;
+        this.version = deviceCapabilities.platformVersion; // requires http://tizen.org/privilege/system  (and not "systeminfo")  privileges to be added in config.xml
         this.uuid = deviceCapabilities.duid;
         this.model = deviceCapabilities.platformName;
-        this.name = this.model;
-
+        
         channel.onCordovaInfoReady.fire();
      }
      else {
@@ -7802,6 +7833,382 @@ module.exports = {
 
 });
 
+// file: lib/tizen/plugin/tizen/Globalization.js
+define("cordova/plugin/tizen/Globalization", function(require, exports, module) {
+
+var argscheck = require('cordova/argscheck'),
+    exec = require('cordova/exec'),
+    GlobalizationError = require('cordova/plugin/GlobalizationError');
+
+var globalization = {
+
+/**
+* Returns the string identifier for the client's current language.
+* It returns the language identifier string to the successCB callback with a
+* properties object as a parameter. If there is an error getting the language,
+* then the errorCB callback is invoked.
+*
+* @param {Function} successCB
+* @param {Function} errorCB
+*
+* @return Object.value {String}: The language identifier
+*
+* @error GlobalizationError.UNKNOWN_ERROR
+*
+* Example
+*    globalization.getPreferredLanguage(function (language) {alert('language:' + language.value + '\n');},
+*                                function () {});
+*/
+getPreferredLanguage:function(successCB, failureCB) {
+    argscheck.checkArgs('fF', 'Globalization.getPreferredLanguage', arguments);
+    console.log('exec(successCB, failureCB, "Globalization","getPreferredLanguage", []);');
+},
+
+/**
+* Returns the string identifier for the client's current locale setting.
+* It returns the locale identifier string to the successCB callback with a
+* properties object as a parameter. If there is an error getting the locale,
+* then the errorCB callback is invoked.
+*
+* @param {Function} successCB
+* @param {Function} errorCB
+*
+* @return Object.value {String}: The locale identifier
+*
+* @error GlobalizationError.UNKNOWN_ERROR
+*
+* Example
+*    globalization.getLocaleName(function (locale) {alert('locale:' + locale.value + '\n');},
+*                                function () {});
+*/
+getLocaleName:function(successCB, failureCB) {
+    argscheck.checkArgs('fF', 'Globalization.getLocaleName', arguments);
+    console.log('exec(successCB, failureCB, "Globalization","getLocaleName", []);');
+},
+
+
+/**
+* Returns a date formatted as a string according to the client's user preferences and
+* calendar using the time zone of the client. It returns the formatted date string to the
+* successCB callback with a properties object as a parameter. If there is an error
+* formatting the date, then the errorCB callback is invoked.
+*
+* The defaults are: formatLenght="short" and selector="date and time"
+*
+* @param {Date} date
+* @param {Function} successCB
+* @param {Function} errorCB
+* @param {Object} options {optional}
+*            formatLength {String}: 'short', 'medium', 'long', or 'full'
+*            selector {String}: 'date', 'time', or 'date and time'
+*
+* @return Object.value {String}: The localized date string
+*
+* @error GlobalizationError.FORMATTING_ERROR
+*
+* Example
+*    globalization.dateToString(new Date(),
+*                function (date) {alert('date:' + date.value + '\n');},
+*                function (errorCode) {alert(errorCode);},
+*                {formatLength:'short'});
+*/
+dateToString:function(date, successCB, failureCB, options) {
+    argscheck.checkArgs('dfFO', 'Globalization.dateToString', arguments);
+    var dateValue = date.valueOf();
+    console.log('exec(successCB, failureCB, "Globalization", "dateToString", [{"date": dateValue, "options": options}]);');
+},
+
+
+/**
+* Parses a date formatted as a string according to the client's user
+* preferences and calendar using the time zone of the client and returns
+* the corresponding date object. It returns the date to the successCB
+* callback with a properties object as a parameter. If there is an error
+* parsing the date string, then the errorCB callback is invoked.
+*
+* The defaults are: formatLength="short" and selector="date and time"
+*
+* @param {String} dateString
+* @param {Function} successCB
+* @param {Function} errorCB
+* @param {Object} options {optional}
+*            formatLength {String}: 'short', 'medium', 'long', or 'full'
+*            selector {String}: 'date', 'time', or 'date and time'
+*
+* @return    Object.year {Number}: The four digit year
+*            Object.month {Number}: The month from (0 - 11)
+*            Object.day {Number}: The day from (1 - 31)
+*            Object.hour {Number}: The hour from (0 - 23)
+*            Object.minute {Number}: The minute from (0 - 59)
+*            Object.second {Number}: The second from (0 - 59)
+*            Object.millisecond {Number}: The milliseconds (from 0 - 999),
+*                                        not available on all platforms
+*
+* @error GlobalizationError.PARSING_ERROR
+*
+* Example
+*    globalization.stringToDate('4/11/2011',
+*                function (date) { alert('Month:' + date.month + '\n' +
+*                    'Day:' + date.day + '\n' +
+*                    'Year:' + date.year + '\n');},
+*                function (errorCode) {alert(errorCode);},
+*                {selector:'date'});
+*/
+stringToDate:function(dateString, successCB, failureCB, options) {
+    argscheck.checkArgs('sfFO', 'Globalization.stringToDate', arguments);
+    console.log('exec(successCB, failureCB, "Globalization", "stringToDate", [{"dateString": dateString, "options": options}]);');
+},
+
+
+/**
+* Returns a pattern string for formatting and parsing dates according to the client's
+* user preferences. It returns the pattern to the successCB callback with a
+* properties object as a parameter. If there is an error obtaining the pattern,
+* then the errorCB callback is invoked.
+*
+* The defaults are: formatLength="short" and selector="date and time"
+*
+* @param {Function} successCB
+* @param {Function} errorCB
+* @param {Object} options {optional}
+*            formatLength {String}: 'short', 'medium', 'long', or 'full'
+*            selector {String}: 'date', 'time', or 'date and time'
+*
+* @return    Object.pattern {String}: The date and time pattern for formatting and parsing dates.
+*                                    The patterns follow Unicode Technical Standard #35
+*                                    http://unicode.org/reports/tr35/tr35-4.html
+*            Object.timezone {String}: The abbreviated name of the time zone on the client
+*            Object.utc_offset {Number}: The current difference in seconds between the client's
+*                                        time zone and coordinated universal time.
+*            Object.dst_offset {Number}: The current daylight saving time offset in seconds
+*                                        between the client's non-daylight saving's time zone
+*                                        and the client's daylight saving's time zone.
+*
+* @error GlobalizationError.PATTERN_ERROR
+*
+* Example
+*    globalization.getDatePattern(
+*                function (date) {alert('pattern:' + date.pattern + '\n');},
+*                function () {},
+*                {formatLength:'short'});
+*/
+getDatePattern:function(successCB, failureCB, options) {
+    argscheck.checkArgs('fFO', 'Globalization.getDatePattern', arguments);
+    console.log(' exec(successCB, failureCB, "Globalization", "getDatePattern", [{"options": options}]);');
+},
+
+
+/**
+* Returns an array of either the names of the months or days of the week
+* according to the client's user preferences and calendar. It returns the array of names to the
+* successCB callback with a properties object as a parameter. If there is an error obtaining the
+* names, then the errorCB callback is invoked.
+*
+* The defaults are: type="wide" and item="months"
+*
+* @param {Function} successCB
+* @param {Function} errorCB
+* @param {Object} options {optional}
+*            type {String}: 'narrow' or 'wide'
+*            item {String}: 'months', or 'days'
+*
+* @return Object.value {Array{String}}: The array of names starting from either
+*                                        the first month in the year or the
+*                                        first day of the week.
+* @error GlobalizationError.UNKNOWN_ERROR
+*
+* Example
+*    globalization.getDateNames(function (names) {
+*        for(var i = 0; i < names.value.length; i++) {
+*            alert('Month:' + names.value[i] + '\n');}},
+*        function () {});
+*/
+getDateNames:function(successCB, failureCB, options) {
+    argscheck.checkArgs('fFO', 'Globalization.getDateNames', arguments);
+    console.log('exec(successCB, failureCB, "Globalization", "getDateNames", [{"options": options}]);');
+},
+
+/**
+* Returns whether daylight savings time is in effect for a given date using the client's
+* time zone and calendar. It returns whether or not daylight savings time is in effect
+* to the successCB callback with a properties object as a parameter. If there is an error
+* reading the date, then the errorCB callback is invoked.
+*
+* @param {Date} date
+* @param {Function} successCB
+* @param {Function} errorCB
+*
+* @return Object.dst {Boolean}: The value "true" indicates that daylight savings time is
+*                                in effect for the given date and "false" indicate that it is not.
+*
+* @error GlobalizationError.UNKNOWN_ERROR
+*
+* Example
+*    globalization.isDayLightSavingsTime(new Date(),
+*                function (date) {alert('dst:' + date.dst + '\n');}
+*                function () {});
+*/
+isDayLightSavingsTime:function(date, successCB, failureCB) {
+    argscheck.checkArgs('dfF', 'Globalization.isDayLightSavingsTime', arguments);
+    var dateValue = date.valueOf();
+    console.log('exec(successCB, failureCB, "Globalization", "isDayLightSavingsTime", [{"date": dateValue}]);');
+},
+
+/**
+* Returns the first day of the week according to the client's user preferences and calendar.
+* The days of the week are numbered starting from 1 where 1 is considered to be Sunday.
+* It returns the day to the successCB callback with a properties object as a parameter.
+* If there is an error obtaining the pattern, then the errorCB callback is invoked.
+*
+* @param {Function} successCB
+* @param {Function} errorCB
+*
+* @return Object.value {Number}: The number of the first day of the week.
+*
+* @error GlobalizationError.UNKNOWN_ERROR
+*
+* Example
+*    globalization.getFirstDayOfWeek(function (day)
+*                { alert('Day:' + day.value + '\n');},
+*                function () {});
+*/
+getFirstDayOfWeek:function(successCB, failureCB) {
+    argscheck.checkArgs('fF', 'Globalization.getFirstDayOfWeek', arguments);
+    console.log('exec(successCB, failureCB, "Globalization", "getFirstDayOfWeek", []);');
+},
+
+
+/**
+* Returns a number formatted as a string according to the client's user preferences.
+* It returns the formatted number string to the successCB callback with a properties object as a
+* parameter. If there is an error formatting the number, then the errorCB callback is invoked.
+*
+* The defaults are: type="decimal"
+*
+* @param {Number} number
+* @param {Function} successCB
+* @param {Function} errorCB
+* @param {Object} options {optional}
+*            type {String}: 'decimal', "percent", or 'currency'
+*
+* @return Object.value {String}: The formatted number string.
+*
+* @error GlobalizationError.FORMATTING_ERROR
+*
+* Example
+*    globalization.numberToString(3.25,
+*                function (number) {alert('number:' + number.value + '\n');},
+*                function () {},
+*                {type:'decimal'});
+*/
+numberToString:function(number, successCB, failureCB, options) {
+    argscheck.checkArgs('nfFO', 'Globalization.numberToString', arguments);
+    console.log('exec(successCB, failureCB, "Globalization", "numberToString", [{"number": number, "options": options}]);');
+},
+
+/**
+* Parses a number formatted as a string according to the client's user preferences and
+* returns the corresponding number. It returns the number to the successCB callback with a
+* properties object as a parameter. If there is an error parsing the number string, then
+* the errorCB callback is invoked.
+*
+* The defaults are: type="decimal"
+*
+* @param {String} numberString
+* @param {Function} successCB
+* @param {Function} errorCB
+* @param {Object} options {optional}
+*            type {String}: 'decimal', "percent", or 'currency'
+*
+* @return Object.value {Number}: The parsed number.
+*
+* @error GlobalizationError.PARSING_ERROR
+*
+* Example
+*    globalization.stringToNumber('1234.56',
+*                function (number) {alert('Number:' + number.value + '\n');},
+*                function () { alert('Error parsing number');});
+*/
+stringToNumber:function(numberString, successCB, failureCB, options) {
+    argscheck.checkArgs('sfFO', 'Globalization.stringToNumber', arguments);
+    console.log('exec(successCB, failureCB, "Globalization", "stringToNumber", [{"numberString": numberString, "options": options}]);');
+},
+
+/**
+* Returns a pattern string for formatting and parsing numbers according to the client's user
+* preferences. It returns the pattern to the successCB callback with a properties object as a
+* parameter. If there is an error obtaining the pattern, then the errorCB callback is invoked.
+*
+* The defaults are: type="decimal"
+*
+* @param {Function} successCB
+* @param {Function} errorCB
+* @param {Object} options {optional}
+*            type {String}: 'decimal', "percent", or 'currency'
+*
+* @return    Object.pattern {String}: The number pattern for formatting and parsing numbers.
+*                                    The patterns follow Unicode Technical Standard #35.
+*                                    http://unicode.org/reports/tr35/tr35-4.html
+*            Object.symbol {String}: The symbol to be used when formatting and parsing
+*                                    e.g., percent or currency symbol.
+*            Object.fraction {Number}: The number of fractional digits to use when parsing and
+*                                    formatting numbers.
+*            Object.rounding {Number}: The rounding increment to use when parsing and formatting.
+*            Object.positive {String}: The symbol to use for positive numbers when parsing and formatting.
+*            Object.negative: {String}: The symbol to use for negative numbers when parsing and formatting.
+*            Object.decimal: {String}: The decimal symbol to use for parsing and formatting.
+*            Object.grouping: {String}: The grouping symbol to use for parsing and formatting.
+*
+* @error GlobalizationError.PATTERN_ERROR
+*
+* Example
+*    globalization.getNumberPattern(
+*                function (pattern) {alert('Pattern:' + pattern.pattern + '\n');},
+*                function () {});
+*/
+getNumberPattern:function(successCB, failureCB, options) {
+    argscheck.checkArgs('fFO', 'Globalization.getNumberPattern', arguments);
+    console.log('exec(successCB, failureCB, "Globalization", "getNumberPattern", [{"options": options}]);');
+},
+
+/**
+* Returns a pattern string for formatting and parsing currency values according to the client's
+* user preferences and ISO 4217 currency code. It returns the pattern to the successCB callback with a
+* properties object as a parameter. If there is an error obtaining the pattern, then the errorCB
+* callback is invoked.
+*
+* @param {String} currencyCode
+* @param {Function} successCB
+* @param {Function} errorCB
+*
+* @return    Object.pattern {String}: The currency pattern for formatting and parsing currency values.
+*                                    The patterns follow Unicode Technical Standard #35
+*                                    http://unicode.org/reports/tr35/tr35-4.html
+*            Object.code {String}: The ISO 4217 currency code for the pattern.
+*            Object.fraction {Number}: The number of fractional digits to use when parsing and
+*                                    formatting currency.
+*            Object.rounding {Number}: The rounding increment to use when parsing and formatting.
+*            Object.decimal: {String}: The decimal symbol to use for parsing and formatting.
+*            Object.grouping: {String}: The grouping symbol to use for parsing and formatting.
+*
+* @error GlobalizationError.FORMATTING_ERROR
+*
+* Example
+*    globalization.getCurrencyPattern('EUR',
+*                function (currency) {alert('Pattern:' + currency.pattern + '\n');}
+*                function () {});
+*/
+getCurrencyPattern:function(currencyCode, successCB, failureCB) {
+    argscheck.checkArgs('sfF', 'Globalization.getCurrencyPattern', arguments);
+    console.log('exec(successCB, failureCB, "Globalization", "getCurrencyPattern", [{"currencyCode": currencyCode}]);');
+}
+
+};
+
+module.exports = globalization;
+
+});
+
 // file: lib/tizen/plugin/tizen/Media.js
 define("cordova/plugin/tizen/Media", function(require, exports, module) {
 
@@ -8032,9 +8439,17 @@ module.exports = {
         var cncType = Connection.NONE;
         var infoCount = 0;
         var deviceCapabilities = null;
+        var timerId = 0;
+        var timeout = 300;
 
 
         function connectionCB() {
+
+            if (timerId !== null) {
+                clearTimeout(timerId);
+                timerId = null;
+            }
+
             infoCount++;
 
             if (infoCount > 1) {
@@ -8066,14 +8481,24 @@ module.exports = {
             connectionCB();
         }
 
+
         deviceCapabilities = tizen.systeminfo.getCapabilities();
+
+
+        timerId = setTimeout( function(){
+            timerId = null;
+            infoCount = 1;
+            connectionCB();
+        }, timeout);
 
 
         if (deviceCapabilities.wifi) {
             tizen.systeminfo.getPropertyValue("WIFI_NETWORK", wifiSuccessCB, errorCB);
         }
 
-        tizen.systeminfo.getPropertyValue("CELLULAR_NETWORK", cellularSuccessCB, errorCB);
+        if (deviceCapabilities.telephony) {
+            tizen.systeminfo.getPropertyValue("CELLULAR_NETWORK", cellularSuccessCB, errorCB);
+        }
 
     }
 };
@@ -8703,11 +9128,21 @@ require('cordova/channel').onNativeReady.fire();
         }
     }
 
+    function scriptErrorCallback(err) {
+        // Open Question: If a script path specified in cordova_plugins.js does not exist, do we fail for all?
+        // this is currently just continuing.
+        scriptCounter--;
+        if (scriptCounter === 0) {
+            onScriptLoadingComplete && onScriptLoadingComplete();
+        }
+    }
+
     // Helper function to inject a <script> tag.
     function injectScript(path) {
         scriptCounter++;
         var script = document.createElement("script");
         script.onload = scriptLoadedCallback;
+        script.onerror = scriptErrorCallback;
         script.src = path;
         document.head.appendChild(script);
     }
@@ -8719,10 +9154,10 @@ require('cordova/channel').onNativeReady.fire();
         context.cordova.require('cordova/channel').onPluginsReady.fire();
     }
 
-    // Handler for the cordova_plugins.json content.
+    // Handler for the cordova_plugins.js content.
     // See plugman's plugin_loader.js for the details of this object.
     // This function is only called if the really is a plugins array that isn't empty.
-    // Otherwise the XHR response handler will just call finishPluginLoading().
+    // Otherwise the onerror response handler will just call finishPluginLoading().
     function handlePluginsObject(modules, path) {
         // First create the callback for when all plugins are loaded.
         var mapper = context.cordova.require('cordova/modulemapper');
@@ -8730,25 +9165,30 @@ require('cordova/channel').onNativeReady.fire();
             // Loop through all the plugins and then through their clobbers and merges.
             for (var i = 0; i < modules.length; i++) {
                 var module = modules[i];
-                if (!module) continue;
+                if (module) {
+                    try { 
+                        if (module.clobbers && module.clobbers.length) {
+                            for (var j = 0; j < module.clobbers.length; j++) {
+                                mapper.clobbers(module.id, module.clobbers[j]);
+                            }
+                        }
 
-                if (module.clobbers && module.clobbers.length) {
-                    for (var j = 0; j < module.clobbers.length; j++) {
-                        mapper.clobbers(module.id, module.clobbers[j]);
+                        if (module.merges && module.merges.length) {
+                            for (var k = 0; k < module.merges.length; k++) {
+                                mapper.merges(module.id, module.merges[k]);
+                            }
+                        }
+
+                        // Finally, if runs is truthy we want to simply require() the module.
+                        // This can be skipped if it had any merges or clobbers, though,
+                        // since the mapper will already have required the module.
+                        if (module.runs && !(module.clobbers && module.clobbers.length) && !(module.merges && module.merges.length)) {
+                            context.cordova.require(module.id);
+                        }
                     }
-                }
-
-                if (module.merges && module.merges.length) {
-                    for (var k = 0; k < module.merges.length; k++) {
-                        mapper.merges(module.id, module.merges[k]);
+                    catch(err) {
+                        // error with module, most likely clobbers, should we continue?
                     }
-                }
-
-                // Finally, if runs is truthy we want to simply require() the module.
-                // This can be skipped if it had any merges or clobbers, though,
-                // since the mapper will already have required the module.
-                if (module.runs && !(module.clobbers && module.clobbers.length) && !(module.merges && module.merges.length)) {
-                    context.cordova.require(module.id);
                 }
             }
 
@@ -8772,6 +9212,33 @@ require('cordova/channel').onNativeReady.fire();
             break;
         }
     }
+
+    var plugins_json = path + 'cordova_plugins.json';
+    var plugins_js = path + 'cordova_plugins.js';
+
+    // One some phones (Windows) this xhr.open throws an Access Denied exception
+    // So lets keep trying, but with a script tag injection technique instead of XHR
+    var injectPluginScript = function injectPluginScript() {
+        try {
+            var script = document.createElement("script");
+            script.onload = function(){
+                var list = cordova.require("cordova/plugin_list");
+                handlePluginsObject(list,path);
+            };
+            script.onerror = function() {
+                // Error loading cordova_plugins.js, file not found or something
+                // this is an acceptable error, pre-3.0.0, so we just move on.
+                finishPluginLoading();
+            };
+            script.src = plugins_js;
+            document.head.appendChild(script);
+
+        } catch(err){
+            finishPluginLoading();
+        }
+    } 
+
+
     // Try to XHR the cordova_plugins.json file asynchronously.
     var xhr = new XMLHttpRequest();
     xhr.onload = function() {
@@ -8790,14 +9257,16 @@ require('cordova/channel').onNativeReady.fire();
         }
     };
     xhr.onerror = function() {
-        finishPluginLoading();
+        // In this case, the json file was not present, but XHR was allowed, 
+        // so we should still try the script injection technique with the js file
+        // in case that is there.
+        injectPluginScript();
     };
-    var plugins_json = path + 'cordova_plugins.json';
     try { // we commented we were going to try, so let us actually try and catch
         xhr.open('GET', plugins_json, true); // Async
         xhr.send();
     } catch(err){
-        finishPluginLoading();
+        injectPluginScript();
     }
 }(window));
 
