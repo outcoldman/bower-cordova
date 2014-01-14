@@ -1,4 +1,4 @@
-// Platform: blackberry10
+// Platform: ubuntu
 // 3.3.0
 /*
  Licensed to the Apache Software Foundation (ASF) under one
@@ -792,91 +792,65 @@ module.exports = channel;
 
 });
 
-// file: lib/blackberry10/exec.js
+// file: lib/ubuntu/exec.js
 define("cordova/exec", function(require, exports, module) {
 
 var cordova = require('cordova'),
-    execProxy = require('cordova/exec/proxy');
+    utils = require('cordova/utils');
 
-function RemoteFunctionCall(functionUri) {
-    var params = {};
+var callbackId = 1;
+cordova.callbacks = [];
 
-    function composeUri() {
-        return "http://localhost:8472/" + functionUri;
+cordova.callback = function() {
+    var scId = arguments[0];
+    var callbackRef = null;
+
+    var parameters = [];
+    for (var i = 1; i < arguments.length; i++) {
+        parameters[i-1] = arguments[i];
     }
+    callbackRef = cordova.callbacks[scId];
 
-    function createXhrRequest(uri, isAsync) {
-        var request = new XMLHttpRequest();
-        request.open("POST", uri, isAsync);
-        request.setRequestHeader("Content-Type", "application/json");
-        return request;
+    // Even IDs are success-, odd are error-callbacks - make sure we remove both
+    if ((scId % 2) !== 0) {
+        scId = scId - 1;
     }
+    // Remove both the success as well as the error callback from the stack
+    delete cordova.callbacks[scId];
+    delete cordova.callbacks[scId + 1];
 
-    this.addParam = function (name, value) {
-        params[name] = encodeURIComponent(JSON.stringify(value));
-    };
-
-    this.makeSyncCall = function () {
-        var requestUri = composeUri(),
-        request = createXhrRequest(requestUri, false),
-        response;
-        request.send(JSON.stringify(params));
-        response = JSON.parse(decodeURIComponent(request.responseText) || "null");
-        return response;
-    };
-
-}
-
-module.exports = function (success, fail, service, action, args) {
-    var uri = service + "/" + action,
-    request = new RemoteFunctionCall(uri),
-    callbackId = service + cordova.callbackId++,
-    proxy,
-    response,
-    name,
-    didSucceed;
-
-    cordova.callbacks[callbackId] = {
-        success: success,
-        fail: fail
-    };
-
-    proxy = execProxy.get(service, action);
-
-    if (proxy) {
-        proxy(success, fail, args);
-    }
-
-    else {
-
-        request.addParam("callbackId", callbackId);
-
-        for (name in args) {
-            if (Object.hasOwnProperty.call(args, name)) {
-                request.addParam(name, args[name]);
-            }
-        }
-        
-        response = request.makeSyncCall();
-
-        if (response.code < 0) {
-            if (fail) {
-                fail(response.msg, response);
-            }
-            delete cordova.callbacks[callbackId];
-        } else {
-            didSucceed = response.code === cordova.callbackStatus.OK || response.code === cordova.callbackStatus.NO_RESULT;
-            cordova.callbackFromNative(
-                callbackId,
-                didSucceed,
-                response.code,
-                [ didSucceed ? response.data : response.msg ],
-                !!response.keepCallback
-            );
-        }
-    }
-
+    if (typeof callbackRef == "function") callbackRef.apply(this, parameters);
 };
+
+cordova.callbackWithoutRemove = function() {
+    var scId = arguments[0];
+    var callbackRef = null;
+
+    var parameters = [];
+    for (var i = 1; i < arguments.length; i++) {
+        parameters[i-1] = arguments[i];
+    }
+    callbackRef = cordova.callbacks[scId];
+
+    if (typeof(callbackRef) == "function") callbackRef.apply(this, parameters);
+};
+
+function ubuntuExec(success, fail, service, action, args) {
+    if (callbackId % 2) {
+        callbackId++;
+    }
+
+    var scId = callbackId++;
+    var ecId = callbackId++;
+    cordova.callbacks[scId] = success;
+    cordova.callbacks[ecId] = fail;
+
+    args.unshift(ecId);
+    args.unshift(scId);
+
+    navigator.qt.postMessage(JSON.stringify({messageType: "callPluginFunction", plugin: service, func: action, params: args}));
+}
+module.exports = ubuntuExec;
 
 });
 
@@ -1125,44 +1099,19 @@ exports.reset();
 
 });
 
-// file: lib/blackberry10/platform.js
+// file: lib/ubuntu/platform.js
 define("cordova/platform", function(require, exports, module) {
-
 module.exports = {
-
-    id: "blackberry10",
-
+    id: "ubuntu",
     bootstrap: function() {
+        var channel = require("cordova/channel"),
+            cordova = require('cordova'),
+            exec = require('cordova/exec'),
+            modulemapper = require('cordova/modulemapper');
 
-        var channel = require('cordova/channel'),
-            addEventListener = document.addEventListener;
-
-        //ready as soon as the plugins are
-        channel.onPluginsReady.subscribe(function () {
-            channel.onNativeReady.fire();
-        });
-
-        //pass document online/offline event listeners to window
-        document.addEventListener = function (type) {
-            if (type === "online" || type === "offline") {
-                window.addEventListener.apply(window, arguments);
-            } else {
-                addEventListener.apply(document, arguments);
-            }
-        };
-
-        //map blackberry.event to document
-        if (!window.blackberry) {
-            window.blackberry = {};
-        }
-        window.blackberry.event =
-        {
-            addEventListener: document.addEventListener,
-            removeEventListener: document.removeEventListener
-        };
-
+        modulemapper.clobbers('cordova/exec/proxy', 'cordova.commandProxy');
+        require('cordova/channel').onNativeReady.fire();
     }
-
 };
 
 });

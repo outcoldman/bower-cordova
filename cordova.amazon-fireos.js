@@ -1,4 +1,4 @@
-// Platform: blackberry10
+// Platform: amazon-fireos
 // 3.3.0
 /*
  Licensed to the Apache Software Foundation (ASF) under one
@@ -313,6 +313,51 @@ var cordova = {
 
 
 module.exports = cordova;
+
+});
+
+// file: lib/amazon-fireos/android/nativeapiprovider.js
+define("cordova/android/nativeapiprovider", function(require, exports, module) {
+
+/**
+ * Exports the ExposedJsApi.java object if available, otherwise exports the PromptBasedNativeApi.
+ */
+
+var nativeApi = this._cordovaNative || require('cordova/android/promptbasednativeapi');
+var currentApi = nativeApi;
+
+module.exports = {
+    get: function() { return currentApi; },
+    setPreferPrompt: function(value) {
+        currentApi = value ? require('cordova/android/promptbasednativeapi') : nativeApi;
+    },
+    // Used only by tests.
+    set: function(value) {
+        currentApi = value;
+    }
+};
+
+});
+
+// file: lib/amazon-fireos/android/promptbasednativeapi.js
+define("cordova/android/promptbasednativeapi", function(require, exports, module) {
+
+/**
+ * Implements the API of ExposedJsApi.java, but uses prompt() to communicate.
+ * This is used only on the 2.3 simulator, where addJavascriptInterface() is broken.
+ */
+
+module.exports = {
+    exec: function(service, action, callbackId, argsJson) {
+        return prompt(argsJson, 'gap:'+JSON.stringify([service, action, callbackId]));
+    },
+    setNativeToJsBridgeMode: function(value) {
+        prompt(value, 'gap_bridge_mode:');
+    },
+    retrieveJsMessages: function(fromOnlineEvent) {
+        return prompt(+fromOnlineEvent, 'gap_poll:');
+    }
+};
 
 });
 
@@ -792,91 +837,240 @@ module.exports = channel;
 
 });
 
-// file: lib/blackberry10/exec.js
+// file: lib/amazon-fireos/exec.js
 define("cordova/exec", function(require, exports, module) {
 
+/**
+ * Execute a cordova command.  It is up to the native side whether this action
+ * is synchronous or asynchronous.  The native side can return:
+ *      Synchronous: PluginResult object as a JSON string
+ *      Asynchronous: Empty string ""
+ * If async, the native side will cordova.callbackSuccess or cordova.callbackError,
+ * depending upon the result of the action.
+ *
+ * @param {Function} success    The success callback
+ * @param {Function} fail       The fail callback
+ * @param {String} service      The name of the service to use
+ * @param {String} action       Action to be run in cordova
+ * @param {String[]} [args]     Zero or more arguments to pass to the method
+ */
 var cordova = require('cordova'),
-    execProxy = require('cordova/exec/proxy');
+    nativeApiProvider = require('cordova/android/nativeapiprovider'),
+    utils = require('cordova/utils'),
+    base64 = require('cordova/base64'),
+    jsToNativeModes = {
+        PROMPT: 0,
+        JS_OBJECT: 1,
+        // This mode is currently for benchmarking purposes only. It must be enabled
+        // on the native side through the ENABLE_LOCATION_CHANGE_EXEC_MODE
+        // constant within CordovaWebViewClient.java before it will work.
+        LOCATION_CHANGE: 2
+    },
+    nativeToJsModes = {
+        // Polls for messages using the JS->Native bridge.
+        POLLING: 0,
+        // For LOAD_URL to be viable, it would need to have a work-around for
+        // the bug where the soft-keyboard gets dismissed when a message is sent.
+        LOAD_URL: 1,
+        // For the ONLINE_EVENT to be viable, it would need to intercept all event
+        // listeners (both through addEventListener and window.ononline) as well
+        // as set the navigator property itself.
+        ONLINE_EVENT: 2,
+        // Uses reflection to access private APIs of the WebView that can send JS
+        // to be executed.
+        // Requires Android 3.2.4 or above.
+        PRIVATE_API: 3
+    },
+    jsToNativeBridgeMode,  // Set lazily.
+    nativeToJsBridgeMode = nativeToJsModes.ONLINE_EVENT,
+    pollEnabled = false,
+    messagesFromNative = [];
 
-function RemoteFunctionCall(functionUri) {
-    var params = {};
-
-    function composeUri() {
-        return "http://localhost:8472/" + functionUri;
+function androidExec(success, fail, service, action, args) {
+    // Set default bridge modes if they have not already been set.
+    // By default, we use the failsafe, since addJavascriptInterface breaks too often
+    if (jsToNativeBridgeMode === undefined) {
+        androidExec.setJsToNativeBridgeMode(jsToNativeModes.JS_OBJECT);
     }
 
-    function createXhrRequest(uri, isAsync) {
-        var request = new XMLHttpRequest();
-        request.open("POST", uri, isAsync);
-        request.setRequestHeader("Content-Type", "application/json");
-        return request;
+    // Process any ArrayBuffers in the args into a string.
+    for (var i = 0; i < args.length; i++) {
+        if (utils.typeName(args[i]) == 'ArrayBuffer') {
+            args[i] = base64.fromArrayBuffer(args[i]);
+        }
     }
 
-    this.addParam = function (name, value) {
-        params[name] = encodeURIComponent(JSON.stringify(value));
-    };
+    var callbackId = service + cordova.callbackId++,
+        argsJson = JSON.stringify(args);
 
-    this.makeSyncCall = function () {
-        var requestUri = composeUri(),
-        request = createXhrRequest(requestUri, false),
-        response;
-        request.send(JSON.stringify(params));
-        response = JSON.parse(decodeURIComponent(request.responseText) || "null");
-        return response;
-    };
+    if (success || fail) {
+        cordova.callbacks[callbackId] = {success:success, fail:fail};
+    }
 
+    if (jsToNativeBridgeMode == jsToNativeModes.LOCATION_CHANGE) {
+        window.location = 'http://cdv_exec/' + service + '#' + action + '#' + callbackId + '#' + argsJson;
+    } else {
+        var messages = nativeApiProvider.get().exec(service, action, callbackId, argsJson);
+        // If argsJson was received by Java as null, try again with the PROMPT bridge mode.
+        // This happens in rare circumstances, such as when certain Unicode characters are passed over the bridge on a Galaxy S2.  See CB-2666.
+        if (jsToNativeBridgeMode == jsToNativeModes.JS_OBJECT && messages === "@Null arguments.") {
+            androidExec.setJsToNativeBridgeMode(jsToNativeModes.PROMPT);
+            androidExec(success, fail, service, action, args);
+            androidExec.setJsToNativeBridgeMode(jsToNativeModes.JS_OBJECT);
+            return;
+        } else {
+            androidExec.processMessages(messages);
+        }
+    }
 }
 
-module.exports = function (success, fail, service, action, args) {
-    var uri = service + "/" + action,
-    request = new RemoteFunctionCall(uri),
-    callbackId = service + cordova.callbackId++,
-    proxy,
-    response,
-    name,
-    didSucceed;
+function pollOnceFromOnlineEvent() {
+    pollOnce(true);
+}
 
-    cordova.callbacks[callbackId] = {
-        success: success,
-        fail: fail
-    };
+function pollOnce(opt_fromOnlineEvent) {
+    var msg = nativeApiProvider.get().retrieveJsMessages(!!opt_fromOnlineEvent);
+    androidExec.processMessages(msg);
+}
 
-    proxy = execProxy.get(service, action);
-
-    if (proxy) {
-        proxy(success, fail, args);
+function pollingTimerFunc() {
+    if (pollEnabled) {
+        pollOnce();
+        setTimeout(pollingTimerFunc, 50);
     }
+}
 
-    else {
-
-        request.addParam("callbackId", callbackId);
-
-        for (name in args) {
-            if (Object.hasOwnProperty.call(args, name)) {
-                request.addParam(name, args[name]);
-            }
-        }
-        
-        response = request.makeSyncCall();
-
-        if (response.code < 0) {
-            if (fail) {
-                fail(response.msg, response);
-            }
-            delete cordova.callbacks[callbackId];
-        } else {
-            didSucceed = response.code === cordova.callbackStatus.OK || response.code === cordova.callbackStatus.NO_RESULT;
-            cordova.callbackFromNative(
-                callbackId,
-                didSucceed,
-                response.code,
-                [ didSucceed ? response.data : response.msg ],
-                !!response.keepCallback
-            );
-        }
+function hookOnlineApis() {
+    function proxyEvent(e) {
+        cordova.fireWindowEvent(e.type);
     }
+    // The network module takes care of firing online and offline events.
+    // It currently fires them only on document though, so we bridge them
+    // to window here (while first listening for exec()-releated online/offline
+    // events).
+    window.addEventListener('online', pollOnceFromOnlineEvent, false);
+    window.addEventListener('offline', pollOnceFromOnlineEvent, false);
+    cordova.addWindowEventHandler('online');
+    cordova.addWindowEventHandler('offline');
+    document.addEventListener('online', proxyEvent, false);
+    document.addEventListener('offline', proxyEvent, false);
+}
 
+hookOnlineApis();
+
+androidExec.jsToNativeModes = jsToNativeModes;
+androidExec.nativeToJsModes = nativeToJsModes;
+
+androidExec.setJsToNativeBridgeMode = function(mode) {
+    if (mode == jsToNativeModes.JS_OBJECT && !window._cordovaNative) {
+        console.log('Falling back on PROMPT mode since _cordovaNative is missing. Expected for Android 3.2 and lower only.');
+        mode = jsToNativeModes.PROMPT;
+    }
+    nativeApiProvider.setPreferPrompt(mode == jsToNativeModes.PROMPT);
+    jsToNativeBridgeMode = mode;
 };
+
+androidExec.setNativeToJsBridgeMode = function(mode) {
+    if (mode == nativeToJsBridgeMode) {
+        return;
+    }
+    if (nativeToJsBridgeMode == nativeToJsModes.POLLING) {
+        pollEnabled = false;
+    }
+
+    nativeToJsBridgeMode = mode;
+    // Tell the native side to switch modes.
+    nativeApiProvider.get().setNativeToJsBridgeMode(mode);
+
+    if (mode == nativeToJsModes.POLLING) {
+        pollEnabled = true;
+        setTimeout(pollingTimerFunc, 1);
+    }
+};
+
+// Processes a single message, as encoded by NativeToJsMessageQueue.java.
+function processMessage(message) {
+    try {
+        var firstChar = message.charAt(0);
+        if (firstChar == 'J') {
+            eval(message.slice(1));
+        } else if (firstChar == 'S' || firstChar == 'F') {
+            var success = firstChar == 'S';
+            var keepCallback = message.charAt(1) == '1';
+            var spaceIdx = message.indexOf(' ', 2);
+            var status = +message.slice(2, spaceIdx);
+            var nextSpaceIdx = message.indexOf(' ', spaceIdx + 1);
+            var callbackId = message.slice(spaceIdx + 1, nextSpaceIdx);
+            var payloadKind = message.charAt(nextSpaceIdx + 1);
+            var payload;
+            if (payloadKind == 's') {
+                payload = message.slice(nextSpaceIdx + 2);
+            } else if (payloadKind == 't') {
+                payload = true;
+            } else if (payloadKind == 'f') {
+                payload = false;
+            } else if (payloadKind == 'N') {
+                payload = null;
+            } else if (payloadKind == 'n') {
+                payload = +message.slice(nextSpaceIdx + 2);
+            } else if (payloadKind == 'A') {
+                var data = message.slice(nextSpaceIdx + 2);
+                var bytes = window.atob(data);
+                var arraybuffer = new Uint8Array(bytes.length);
+                for (var i = 0; i < bytes.length; i++) {
+                    arraybuffer[i] = bytes.charCodeAt(i);
+                }
+                payload = arraybuffer.buffer;
+            } else if (payloadKind == 'S') {
+                payload = window.atob(message.slice(nextSpaceIdx + 2));
+            } else {
+                payload = JSON.parse(message.slice(nextSpaceIdx + 1));
+            }
+            cordova.callbackFromNative(callbackId, success, status, [payload], keepCallback);
+        } else {
+            console.log("processMessage failed: invalid message:" + message);
+        }
+    } catch (e) {
+        console.log("processMessage failed: Message: " + message);
+        console.log("processMessage failed: Error: " + e);
+        console.log("processMessage failed: Stack: " + e.stack);
+    }
+}
+
+// This is called from the NativeToJsMessageQueue.java.
+androidExec.processMessages = function(messages) {
+    if (messages) {
+        messagesFromNative.push(messages);
+        // Check for the reentrant case, and enqueue the message if that's the case.
+        if (messagesFromNative.length > 1) {
+            return;
+        }
+        while (messagesFromNative.length) {
+            // Don't unshift until the end so that reentrancy can be detected.
+            messages = messagesFromNative[0];
+            // The Java side can send a * message to indicate that it
+            // still has messages waiting to be retrieved.
+            if (messages == '*') {
+                messagesFromNative.shift();
+                window.setTimeout(pollOnce, 0);
+                return;
+            }
+
+            var spaceIdx = messages.indexOf(' ');
+            var msgLen = +messages.slice(0, spaceIdx);
+            var message = messages.substr(spaceIdx + 1, msgLen);
+            messages = messages.slice(spaceIdx + msgLen + 1);
+            processMessage(message);
+            if (messages) {
+                messagesFromNative[0] = messages;
+            } else {
+                messagesFromNative.shift();
+            }
+        }
+    }
+};
+
+module.exports = androidExec;
 
 });
 
@@ -1125,44 +1319,120 @@ exports.reset();
 
 });
 
-// file: lib/blackberry10/platform.js
+// file: lib/amazon-fireos/platform.js
 define("cordova/platform", function(require, exports, module) {
 
 module.exports = {
-
-    id: "blackberry10",
-
+    id: 'amazon-fireos',
     bootstrap: function() {
-
         var channel = require('cordova/channel'),
-            addEventListener = document.addEventListener;
+            cordova = require('cordova'),
+            exec = require('cordova/exec'),
+            modulemapper = require('cordova/modulemapper');
 
-        //ready as soon as the plugins are
-        channel.onPluginsReady.subscribe(function () {
-            channel.onNativeReady.fire();
+        // Tell the native code that a page change has occurred.
+        exec(null, null, 'PluginManager', 'startup', []);
+        // Tell the JS that the native side is ready.
+        channel.onNativeReady.fire();
+
+        // TODO: Extract this as a proper plugin.
+        modulemapper.clobbers('cordova/plugin/android/app', 'navigator.app');
+
+        // Inject a listener for the backbutton on the document.
+        var backButtonChannel = cordova.addDocumentEventHandler('backbutton');
+        backButtonChannel.onHasSubscribersChange = function() {
+            // If we just attached the first handler or detached the last handler,
+            // let native know we need to override the back button.
+            exec(null, null, "App", "overrideBackbutton", [this.numHandlers == 1]);
+        };
+
+        // Add hardware MENU and SEARCH button handlers
+        cordova.addDocumentEventHandler('menubutton');
+        cordova.addDocumentEventHandler('searchbutton');
+
+        // Let native code know we are all done on the JS side.
+        // Native code will then un-hide the WebView.
+        channel.onCordovaReady.subscribe(function() {
+            exec(null, null, "App", "show", []);
         });
-
-        //pass document online/offline event listeners to window
-        document.addEventListener = function (type) {
-            if (type === "online" || type === "offline") {
-                window.addEventListener.apply(window, arguments);
-            } else {
-                addEventListener.apply(document, arguments);
-            }
-        };
-
-        //map blackberry.event to document
-        if (!window.blackberry) {
-            window.blackberry = {};
-        }
-        window.blackberry.event =
-        {
-            addEventListener: document.addEventListener,
-            removeEventListener: document.removeEventListener
-        };
-
     }
+};
 
+});
+
+// file: lib/amazon-fireos/plugin/android/app.js
+define("cordova/plugin/android/app", function(require, exports, module) {
+
+var exec = require('cordova/exec');
+
+module.exports = {
+    /**
+    * Clear the resource cache.
+    */
+    clearCache:function() {
+        exec(null, null, "App", "clearCache", []);
+    },
+
+    /**
+    * Load the url into the webview or into new browser instance.
+    *
+    * @param url           The URL to load
+    * @param props         Properties that can be passed in to the activity:
+    *      wait: int                           => wait msec before loading URL
+    *      loadingDialog: "Title,Message"      => display a native loading dialog
+    *      loadUrlTimeoutValue: int            => time in msec to wait before triggering a timeout error
+    *      clearHistory: boolean              => clear webview history (default=false)
+    *      openExternal: boolean              => open in a new browser (default=false)
+    *
+    * Example:
+    *      navigator.app.loadUrl("http://server/myapp/index.html", {wait:2000, loadingDialog:"Wait,Loading App", loadUrlTimeoutValue: 60000});
+    */
+    loadUrl:function(url, props) {
+        exec(null, null, "App", "loadUrl", [url, props]);
+    },
+
+    /**
+    * Cancel loadUrl that is waiting to be loaded.
+    */
+    cancelLoadUrl:function() {
+        exec(null, null, "App", "cancelLoadUrl", []);
+    },
+
+    /**
+    * Clear web history in this web view.
+    * Instead of BACK button loading the previous web page, it will exit the app.
+    */
+    clearHistory:function() {
+        exec(null, null, "App", "clearHistory", []);
+    },
+
+    /**
+    * Go to previous page displayed.
+    * This is the same as pressing the backbutton on Android device.
+    */
+    backHistory:function() {
+        exec(null, null, "App", "backHistory", []);
+    },
+
+    /**
+    * Override the default behavior of the Android back button.
+    * If overridden, when the back button is pressed, the "backKeyDown" JavaScript event will be fired.
+    *
+    * Note: The user should not have to call this method.  Instead, when the user
+    *       registers for the "backbutton" event, this is automatically done.
+    *
+    * @param override        T=override, F=cancel override
+    */
+    overrideBackbutton:function(override) {
+        exec(null, null, "App", "overrideBackbutton", [override]);
+    },
+
+    /**
+    * Exit and terminate the application.
+    */
+    exitApp:function() {
+        return exec(null, null, "App", "exitApp", []);
+    }
 };
 
 });
