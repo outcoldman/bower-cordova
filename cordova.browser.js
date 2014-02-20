@@ -1,4 +1,4 @@
-// Platform: test
+// Platform: browser
 // 3.4.0
 /*
  Licensed to the Apache Software Foundation (ASF) under one
@@ -313,288 +313,6 @@ var cordova = {
 
 
 module.exports = cordova;
-
-});
-
-// file: src/android/android/nativeapiprovider.js
-define("cordova/android/nativeapiprovider", function(require, exports, module) {
-
-/**
- * Exports the ExposedJsApi.java object if available, otherwise exports the PromptBasedNativeApi.
- */
-
-var nativeApi = this._cordovaNative || require('cordova/android/promptbasednativeapi');
-var currentApi = nativeApi;
-
-module.exports = {
-    get: function() { return currentApi; },
-    setPreferPrompt: function(value) {
-        currentApi = value ? require('cordova/android/promptbasednativeapi') : nativeApi;
-    },
-    // Used only by tests.
-    set: function(value) {
-        currentApi = value;
-    }
-};
-
-});
-
-// file: src/android/android/promptbasednativeapi.js
-define("cordova/android/promptbasednativeapi", function(require, exports, module) {
-
-/**
- * Implements the API of ExposedJsApi.java, but uses prompt() to communicate.
- * This is used only on the 2.3 simulator, where addJavascriptInterface() is broken.
- */
-
-module.exports = {
-    exec: function(service, action, callbackId, argsJson) {
-        return prompt(argsJson, 'gap:'+JSON.stringify([service, action, callbackId]));
-    },
-    setNativeToJsBridgeMode: function(value) {
-        prompt(value, 'gap_bridge_mode:');
-    },
-    retrieveJsMessages: function(fromOnlineEvent) {
-        return prompt(+fromOnlineEvent, 'gap_poll:');
-    }
-};
-
-});
-
-// file: src/test/androidexec.js
-define("cordova/androidexec", function(require, exports, module) {
-
-/**
- * Execute a cordova command.  It is up to the native side whether this action
- * is synchronous or asynchronous.  The native side can return:
- *      Synchronous: PluginResult object as a JSON string
- *      Asynchronous: Empty string ""
- * If async, the native side will cordova.callbackSuccess or cordova.callbackError,
- * depending upon the result of the action.
- *
- * @param {Function} success    The success callback
- * @param {Function} fail       The fail callback
- * @param {String} service      The name of the service to use
- * @param {String} action       Action to be run in cordova
- * @param {String[]} [args]     Zero or more arguments to pass to the method
- */
-var cordova = require('cordova'),
-    nativeApiProvider = require('cordova/android/nativeapiprovider'),
-    utils = require('cordova/utils'),
-    base64 = require('cordova/base64'),
-    jsToNativeModes = {
-        PROMPT: 0,
-        JS_OBJECT: 1,
-        // This mode is currently for benchmarking purposes only. It must be enabled
-        // on the native side through the ENABLE_LOCATION_CHANGE_EXEC_MODE
-        // constant within CordovaWebViewClient.java before it will work.
-        LOCATION_CHANGE: 2
-    },
-    nativeToJsModes = {
-        // Polls for messages using the JS->Native bridge.
-        POLLING: 0,
-        // For LOAD_URL to be viable, it would need to have a work-around for
-        // the bug where the soft-keyboard gets dismissed when a message is sent.
-        LOAD_URL: 1,
-        // For the ONLINE_EVENT to be viable, it would need to intercept all event
-        // listeners (both through addEventListener and window.ononline) as well
-        // as set the navigator property itself.
-        ONLINE_EVENT: 2,
-        // Uses reflection to access private APIs of the WebView that can send JS
-        // to be executed.
-        // Requires Android 3.2.4 or above.
-        PRIVATE_API: 3
-    },
-    jsToNativeBridgeMode,  // Set lazily.
-    nativeToJsBridgeMode = nativeToJsModes.ONLINE_EVENT,
-    pollEnabled = false,
-    messagesFromNative = [];
-
-function androidExec(success, fail, service, action, args) {
-    // Set default bridge modes if they have not already been set.
-    // By default, we use the failsafe, since addJavascriptInterface breaks too often
-    if (jsToNativeBridgeMode === undefined) {
-        androidExec.setJsToNativeBridgeMode(jsToNativeModes.JS_OBJECT);
-    }
-
-    // Process any ArrayBuffers in the args into a string.
-    for (var i = 0; i < args.length; i++) {
-        if (utils.typeName(args[i]) == 'ArrayBuffer') {
-            args[i] = base64.fromArrayBuffer(args[i]);
-        }
-    }
-
-    var callbackId = service + cordova.callbackId++,
-        argsJson = JSON.stringify(args);
-
-    if (success || fail) {
-        cordova.callbacks[callbackId] = {success:success, fail:fail};
-    }
-
-    if (jsToNativeBridgeMode == jsToNativeModes.LOCATION_CHANGE) {
-        window.location = 'http://cdv_exec/' + service + '#' + action + '#' + callbackId + '#' + argsJson;
-    } else {
-        var messages = nativeApiProvider.get().exec(service, action, callbackId, argsJson);
-        // If argsJson was received by Java as null, try again with the PROMPT bridge mode.
-        // This happens in rare circumstances, such as when certain Unicode characters are passed over the bridge on a Galaxy S2.  See CB-2666.
-        if (jsToNativeBridgeMode == jsToNativeModes.JS_OBJECT && messages === "@Null arguments.") {
-            androidExec.setJsToNativeBridgeMode(jsToNativeModes.PROMPT);
-            androidExec(success, fail, service, action, args);
-            androidExec.setJsToNativeBridgeMode(jsToNativeModes.JS_OBJECT);
-            return;
-        } else {
-            androidExec.processMessages(messages);
-        }
-    }
-}
-
-function pollOnceFromOnlineEvent() {
-    pollOnce(true);
-}
-
-function pollOnce(opt_fromOnlineEvent) {
-    var msg = nativeApiProvider.get().retrieveJsMessages(!!opt_fromOnlineEvent);
-    androidExec.processMessages(msg);
-}
-
-function pollingTimerFunc() {
-    if (pollEnabled) {
-        pollOnce();
-        setTimeout(pollingTimerFunc, 50);
-    }
-}
-
-function hookOnlineApis() {
-    function proxyEvent(e) {
-        cordova.fireWindowEvent(e.type);
-    }
-    // The network module takes care of firing online and offline events.
-    // It currently fires them only on document though, so we bridge them
-    // to window here (while first listening for exec()-releated online/offline
-    // events).
-    window.addEventListener('online', pollOnceFromOnlineEvent, false);
-    window.addEventListener('offline', pollOnceFromOnlineEvent, false);
-    cordova.addWindowEventHandler('online');
-    cordova.addWindowEventHandler('offline');
-    document.addEventListener('online', proxyEvent, false);
-    document.addEventListener('offline', proxyEvent, false);
-}
-
-hookOnlineApis();
-
-androidExec.jsToNativeModes = jsToNativeModes;
-androidExec.nativeToJsModes = nativeToJsModes;
-
-androidExec.setJsToNativeBridgeMode = function(mode) {
-    if (mode == jsToNativeModes.JS_OBJECT && !window._cordovaNative) {
-        console.log('Falling back on PROMPT mode since _cordovaNative is missing. Expected for Android 3.2 and lower only.');
-        mode = jsToNativeModes.PROMPT;
-    }
-    nativeApiProvider.setPreferPrompt(mode == jsToNativeModes.PROMPT);
-    jsToNativeBridgeMode = mode;
-};
-
-androidExec.setNativeToJsBridgeMode = function(mode) {
-    if (mode == nativeToJsBridgeMode) {
-        return;
-    }
-    if (nativeToJsBridgeMode == nativeToJsModes.POLLING) {
-        pollEnabled = false;
-    }
-
-    nativeToJsBridgeMode = mode;
-    // Tell the native side to switch modes.
-    nativeApiProvider.get().setNativeToJsBridgeMode(mode);
-
-    if (mode == nativeToJsModes.POLLING) {
-        pollEnabled = true;
-        setTimeout(pollingTimerFunc, 1);
-    }
-};
-
-// Processes a single message, as encoded by NativeToJsMessageQueue.java.
-function processMessage(message) {
-    try {
-        var firstChar = message.charAt(0);
-        if (firstChar == 'J') {
-            eval(message.slice(1));
-        } else if (firstChar == 'S' || firstChar == 'F') {
-            var success = firstChar == 'S';
-            var keepCallback = message.charAt(1) == '1';
-            var spaceIdx = message.indexOf(' ', 2);
-            var status = +message.slice(2, spaceIdx);
-            var nextSpaceIdx = message.indexOf(' ', spaceIdx + 1);
-            var callbackId = message.slice(spaceIdx + 1, nextSpaceIdx);
-            var payloadKind = message.charAt(nextSpaceIdx + 1);
-            var payload;
-            if (payloadKind == 's') {
-                payload = message.slice(nextSpaceIdx + 2);
-            } else if (payloadKind == 't') {
-                payload = true;
-            } else if (payloadKind == 'f') {
-                payload = false;
-            } else if (payloadKind == 'N') {
-                payload = null;
-            } else if (payloadKind == 'n') {
-                payload = +message.slice(nextSpaceIdx + 2);
-            } else if (payloadKind == 'A') {
-                var data = message.slice(nextSpaceIdx + 2);
-                var bytes = window.atob(data);
-                var arraybuffer = new Uint8Array(bytes.length);
-                for (var i = 0; i < bytes.length; i++) {
-                    arraybuffer[i] = bytes.charCodeAt(i);
-                }
-                payload = arraybuffer.buffer;
-            } else if (payloadKind == 'S') {
-                payload = window.atob(message.slice(nextSpaceIdx + 2));
-            } else {
-                payload = JSON.parse(message.slice(nextSpaceIdx + 1));
-            }
-            cordova.callbackFromNative(callbackId, success, status, [payload], keepCallback);
-        } else {
-            console.log("processMessage failed: invalid message:" + message);
-        }
-    } catch (e) {
-        console.log("processMessage failed: Message: " + message);
-        console.log("processMessage failed: Error: " + e);
-        console.log("processMessage failed: Stack: " + e.stack);
-    }
-}
-
-// This is called from the NativeToJsMessageQueue.java.
-androidExec.processMessages = function(messages) {
-    if (messages) {
-        messagesFromNative.push(messages);
-        // Check for the reentrant case, and enqueue the message if that's the case.
-        if (messagesFromNative.length > 1) {
-            return;
-        }
-        while (messagesFromNative.length) {
-            // Don't unshift until the end so that reentrancy can be detected.
-            messages = messagesFromNative[0];
-            // The Java side can send a * message to indicate that it
-            // still has messages waiting to be retrieved.
-            if (messages == '*') {
-                messagesFromNative.shift();
-                window.setTimeout(pollOnce, 0);
-                return;
-            }
-
-            var spaceIdx = messages.indexOf(' ');
-            var msgLen = +messages.slice(0, spaceIdx);
-            var message = messages.substr(spaceIdx + 1, msgLen);
-            messages = messages.slice(spaceIdx + msgLen + 1);
-            processMessage(message);
-            if (messages) {
-                messagesFromNative[0] = messages;
-            } else {
-                messagesFromNative.shift();
-            }
-        }
-    }
-};
-
-module.exports = androidExec;
 
 });
 
@@ -1074,10 +792,36 @@ module.exports = channel;
 
 });
 
-// file: src/test/exec.js
+// file: src/browser/exec.js
 define("cordova/exec", function(require, exports, module) {
 
-module.exports = jasmine.createSpy();
+var cordova = require('cordova');
+var execProxy = require('cordova/exec/proxy');
+
+module.exports = function(success, fail, service, action, args) {
+
+    var proxy = execProxy.get(service, action);
+
+    if (proxy) {
+        var callbackId = service + cordova.callbackId++;
+
+        if (typeof success == "function" || typeof fail == "function") {
+            cordova.callbacks[callbackId] = {success:success, fail:fail};
+        }
+
+        try {
+            proxy(success, fail, args);
+        }
+        catch(e) {
+            // TODO throw maybe?
+            var msg = "Exception calling :: " + service + " :: " + action  + " ::exception=" + e;
+            console.log(msg);
+        }
+    }
+    else {
+        fail && fail("Missing Command Error");
+    }
+};
 
 });
 
@@ -1225,384 +969,6 @@ channel.join(function() {
 
 });
 
-// file: src/test/iosexec.js
-define("cordova/iosexec", function(require, exports, module) {
-
-/**
- * Creates a gap bridge iframe used to notify the native code about queued
- * commands.
- */
-var cordova = require('cordova'),
-    channel = require('cordova/channel'),
-    utils = require('cordova/utils'),
-    base64 = require('cordova/base64'),
-    // XHR mode does not work on iOS 4.2.
-    // XHR mode's main advantage is working around a bug in -webkit-scroll, which
-    // doesn't exist only on iOS 5.x devices.
-    // IFRAME_NAV is the fastest.
-    // IFRAME_HASH could be made to enable synchronous bridge calls if we wanted this feature.
-    jsToNativeModes = {
-        IFRAME_NAV: 0,
-        XHR_NO_PAYLOAD: 1,
-        XHR_WITH_PAYLOAD: 2,
-        XHR_OPTIONAL_PAYLOAD: 3,
-        IFRAME_HASH_NO_PAYLOAD: 4,
-        // Bundling the payload turns out to be slower. Probably since it has to be URI encoded / decoded.
-        IFRAME_HASH_WITH_PAYLOAD: 5
-    },
-    bridgeMode,
-    execIframe,
-    execHashIframe,
-    hashToggle = 1,
-    execXhr,
-    requestCount = 0,
-    vcHeaderValue = null,
-    commandQueue = [], // Contains pending JS->Native messages.
-    isInContextOfEvalJs = 0;
-
-function createExecIframe() {
-    var iframe = document.createElement("iframe");
-    iframe.style.display = 'none';
-    document.body.appendChild(iframe);
-    return iframe;
-}
-
-function createHashIframe() {
-    var ret = createExecIframe();
-    // Hash changes don't work on about:blank, so switch it to file:///.
-    ret.contentWindow.history.replaceState(null, null, 'file:///#');
-    return ret;
-}
-
-function shouldBundleCommandJson() {
-    if (bridgeMode === jsToNativeModes.XHR_WITH_PAYLOAD) {
-        return true;
-    }
-    if (bridgeMode === jsToNativeModes.XHR_OPTIONAL_PAYLOAD) {
-        var payloadLength = 0;
-        for (var i = 0; i < commandQueue.length; ++i) {
-            payloadLength += commandQueue[i].length;
-        }
-        // The value here was determined using the benchmark within CordovaLibApp on an iPad 3.
-        return payloadLength < 4500;
-    }
-    return false;
-}
-
-function massageArgsJsToNative(args) {
-    if (!args || utils.typeName(args) != 'Array') {
-        return args;
-    }
-    var ret = [];
-    args.forEach(function(arg, i) {
-        if (utils.typeName(arg) == 'ArrayBuffer') {
-            ret.push({
-                'CDVType': 'ArrayBuffer',
-                'data': base64.fromArrayBuffer(arg)
-            });
-        } else {
-            ret.push(arg);
-        }
-    });
-    return ret;
-}
-
-function massageMessageNativeToJs(message) {
-    if (message.CDVType == 'ArrayBuffer') {
-        var stringToArrayBuffer = function(str) {
-            var ret = new Uint8Array(str.length);
-            for (var i = 0; i < str.length; i++) {
-                ret[i] = str.charCodeAt(i);
-            }
-            return ret.buffer;
-        };
-        var base64ToArrayBuffer = function(b64) {
-            return stringToArrayBuffer(atob(b64));
-        };
-        message = base64ToArrayBuffer(message.data);
-    }
-    return message;
-}
-
-function convertMessageToArgsNativeToJs(message) {
-    var args = [];
-    if (!message || !message.hasOwnProperty('CDVType')) {
-        args.push(message);
-    } else if (message.CDVType == 'MultiPart') {
-        message.messages.forEach(function(e) {
-            args.push(massageMessageNativeToJs(e));
-        });
-    } else {
-        args.push(massageMessageNativeToJs(message));
-    }
-    return args;
-}
-
-function iOSExec() {
-    // Use XHR for iOS 5 to work around a bug in -webkit-scroll.
-    // Use IFRAME_NAV elsewhere since it's faster and XHR bridge
-    // seems to have bugs in newer OS's (CB-3900, CB-3359, CB-5457, CB-4970, CB-4998, CB-5134)
-    if (bridgeMode === undefined) {
-        bridgeMode = navigator.userAgent.indexOf(' 5_') == -1 ? jsToNativeModes.IFRAME_NAV: jsToNativeModes.XHR_NO_PAYLOAD;
-    }
-
-    var successCallback, failCallback, service, action, actionArgs, splitCommand;
-    var callbackId = null;
-    if (typeof arguments[0] !== "string") {
-        // FORMAT ONE
-        successCallback = arguments[0];
-        failCallback = arguments[1];
-        service = arguments[2];
-        action = arguments[3];
-        actionArgs = arguments[4];
-
-        // Since we need to maintain backwards compatibility, we have to pass
-        // an invalid callbackId even if no callback was provided since plugins
-        // will be expecting it. The Cordova.exec() implementation allocates
-        // an invalid callbackId and passes it even if no callbacks were given.
-        callbackId = 'INVALID';
-    } else {
-        // FORMAT TWO, REMOVED
-        try {
-            splitCommand = arguments[0].split(".");
-            action = splitCommand.pop();
-            service = splitCommand.join(".");
-            actionArgs = Array.prototype.splice.call(arguments, 1);
-
-            console.log('The old format of this exec call has been removed (deprecated since 2.1). Change to: ' +
-                       "cordova.exec(null, null, \"" + service + "\", \"" + action + "\"," + JSON.stringify(actionArgs) + ");"
-            );
-            return;
-        } catch (e) {}
-    }
-
-    // Register the callbacks and add the callbackId to the positional
-    // arguments if given.
-    if (successCallback || failCallback) {
-        callbackId = service + cordova.callbackId++;
-        cordova.callbacks[callbackId] =
-            {success:successCallback, fail:failCallback};
-    }
-
-    actionArgs = massageArgsJsToNative(actionArgs);
-
-    var command = [callbackId, service, action, actionArgs];
-
-    // Stringify and queue the command. We stringify to command now to
-    // effectively clone the command arguments in case they are mutated before
-    // the command is executed.
-    commandQueue.push(JSON.stringify(command));
-
-    // If we're in the context of a stringByEvaluatingJavaScriptFromString call,
-    // then the queue will be flushed when it returns; no need for a poke.
-    // Also, if there is already a command in the queue, then we've already
-    // poked the native side, so there is no reason to do so again.
-    if (!isInContextOfEvalJs && commandQueue.length == 1) {
-        switch (bridgeMode) {
-        case jsToNativeModes.XHR_NO_PAYLOAD:
-        case jsToNativeModes.XHR_WITH_PAYLOAD:
-        case jsToNativeModes.XHR_OPTIONAL_PAYLOAD:
-            // This prevents sending an XHR when there is already one being sent.
-            // This should happen only in rare circumstances (refer to unit tests).
-            if (execXhr && execXhr.readyState != 4) {
-                execXhr = null;
-            }
-            // Re-using the XHR improves exec() performance by about 10%.
-            execXhr = execXhr || new XMLHttpRequest();
-            // Changing this to a GET will make the XHR reach the URIProtocol on 4.2.
-            // For some reason it still doesn't work though...
-            // Add a timestamp to the query param to prevent caching.
-            execXhr.open('HEAD', "/!gap_exec?" + (+new Date()), true);
-            if (!vcHeaderValue) {
-                vcHeaderValue = /.*\((.*)\)/.exec(navigator.userAgent)[1];
-            }
-            execXhr.setRequestHeader('vc', vcHeaderValue);
-            execXhr.setRequestHeader('rc', ++requestCount);
-            if (shouldBundleCommandJson()) {
-                execXhr.setRequestHeader('cmds', iOSExec.nativeFetchMessages());
-            }
-            execXhr.send(null);
-            break;
-        case jsToNativeModes.IFRAME_HASH_NO_PAYLOAD:
-        case jsToNativeModes.IFRAME_HASH_WITH_PAYLOAD:
-            execHashIframe = execHashIframe || createHashIframe();
-            // Check if they've removed it from the DOM, and put it back if so.
-            if (!execHashIframe.contentWindow) {
-                execHashIframe = createHashIframe();
-            }
-            // The delegate method is called only when the hash changes, so toggle it back and forth.
-            hashToggle = hashToggle ^ 3;
-            var hashValue = '%0' + hashToggle;
-            if (bridgeMode === jsToNativeModes.IFRAME_HASH_WITH_PAYLOAD) {
-                hashValue += iOSExec.nativeFetchMessages();
-            }
-            execHashIframe.contentWindow.location.hash = hashValue;
-            break;
-        default:
-            execIframe = execIframe || createExecIframe();
-            // Check if they've removed it from the DOM, and put it back if so.
-            if (!execIframe.contentWindow) {
-                execIframe = createExecIframe();
-            }
-            execIframe.src = "gap://ready";
-        }
-    }
-}
-
-iOSExec.jsToNativeModes = jsToNativeModes;
-
-iOSExec.setJsToNativeBridgeMode = function(mode) {
-    // Remove the iFrame since it may be no longer required, and its existence
-    // can trigger browser bugs.
-    // https://issues.apache.org/jira/browse/CB-593
-    if (execIframe) {
-        execIframe.parentNode.removeChild(execIframe);
-        execIframe = null;
-    }
-    bridgeMode = mode;
-};
-
-iOSExec.nativeFetchMessages = function() {
-    // Each entry in commandQueue is a JSON string already.
-    if (!commandQueue.length) {
-        return '';
-    }
-    var json = '[' + commandQueue.join(',') + ']';
-    commandQueue.length = 0;
-    return json;
-};
-
-iOSExec.nativeCallback = function(callbackId, status, message, keepCallback) {
-    return iOSExec.nativeEvalAndFetch(function() {
-        var success = status === 0 || status === 1;
-        var args = convertMessageToArgsNativeToJs(message);
-        cordova.callbackFromNative(callbackId, success, status, args, keepCallback);
-    });
-};
-
-iOSExec.nativeEvalAndFetch = function(func) {
-    // This shouldn't be nested, but better to be safe.
-    isInContextOfEvalJs++;
-    try {
-        func();
-        return iOSExec.nativeFetchMessages();
-    } finally {
-        isInContextOfEvalJs--;
-    }
-};
-
-module.exports = iOSExec;
-
-});
-
-// file: src/test/mockxhr.js
-define("cordova/mockxhr", function(require, exports, module) {
-
-/*jshint -W020 */
-
-var utils = require('cordova/utils');
-var activeXhrs = [];
-var isInstalled = false;
-var origXhr = this.XMLHttpRequest;
-
-function MockXhr() {
-    this.requestHeaders = {};
-    this.readyState = 0;
-
-    this.onreadystatechange = null;
-    this.onload = null;
-    this.onerror = null;
-    this.clearResponse_();
-}
-
-MockXhr.prototype.clearResponse_ = function() {
-    this.url = null;
-    this.method = null;
-    this.async = null;
-    this.requestPayload = undefined;
-
-    this.statusCode = 0;
-    this.responseText = '';
-    this.responseHeaders = {};
-};
-
-MockXhr.prototype.setReadyState_ = function(value) {
-    this.readyState = value;
-    this.onreadystatechange && this.onreadystatechange();
-};
-
-MockXhr.prototype.open = function(method, url, async) {
-    if (this.readyState !== 0 && this.readyState !== 4) {
-        throw Error('Tried to open MockXhr while request in progress.');
-    }
-    this.clearResponse_();
-    this.method = method;
-    this.url = url;
-    this.async = async;
-    this.setReadyState_(1);
-};
-
-MockXhr.prototype.setRequestHeader = function(key, val) {
-    if (this.readyState != 1) {
-        throw Error('Tried to setRequestHeader() without call to open()');
-    }
-    this.requestHeaders[key] = String(val);
-};
-
-MockXhr.prototype.send = function(payload) {
-    if (this.readyState != 1) {
-        throw Error('Tried to send MockXhr without call to open().');
-    }
-    this.requestPayload = payload;
-    this.setReadyState_(2);
-
-    activeXhrs.push(this);
-};
-
-MockXhr.prototype.simulateResponse = function(statusCode, responseText, responseHeaders) {
-    if (this.readyState != 2) {
-        throw Error('Call to simulateResponse() when MockXhr is in state ' + this.readyState);
-    }
-    for (var i = this.readyState; i <= 4; i++) {
-        if (i == 2) {
-            this.statusCode = statusCode;
-            this.responseHeaders = responseHeaders || this.responseHeaders;
-        }
-        if (i == 4) {
-            this.responseText = responseText;
-        }
-        this.setReadyState_(i);
-    }
-    if (statusCode == 200) {
-        this.onload && this.onload();
-    } else {
-        this.onerror && this.onerror();
-    }
-    utils.arrayRemove(activeXhrs, this);
-};
-
-function install() {
-    if (isInstalled) {
-        throw Error('mockxhr.install called without uninstall.');
-    }
-    isInstalled = true;
-    activeXhrs.length = 0;
-    XMLHttpRequest = MockXhr;
-}
-
-function uninstall() {
-    XMLHttpRequest = origXhr;
-    isInstalled = false;
-}
-
-module.exports = {
-    install: install,
-    uninstall: uninstall,
-    activeXhrs: activeXhrs
-};
-
-});
-
 // file: src/common/modulemapper.js
 define("cordova/modulemapper", function(require, exports, module) {
 
@@ -1704,40 +1070,36 @@ exports.reset();
 
 });
 
-// file: src/test/modulereplacer.js
-define("cordova/modulereplacer", function(require, exports, module) {
-
-/*global spyOn:false */
-
-var propertyreplacer = require('cordova/propertyreplacer');
-
-exports.replace = function(moduleName, newValue) {
-    propertyreplacer.stub(define.moduleMap, moduleName, null);
-    define.remove(moduleName);
-    define(moduleName, function(require, exports, module) {
-        module.exports = newValue;
-    });
-};
-
-
-});
-
-// file: src/test/platform.js
+// file: src/browser/platform.js
 define("cordova/platform", function(require, exports, module) {
 
 module.exports = {
-    id: 'test platform',
-    bootstrap: function() {
-        var propertyreplacer = require('cordova/propertyreplacer');
+    id: 'browser',
+    cordovaVersion: '3.4.0',
 
-        require('cordova/builder').replaceHookForTesting = function(obj, key) {
-            // This doesn't clean up non-clobbering assignments, nor does it work for
-            // getters. It does work to un-clobber clobbered / merged symbols, which
-            // is generally good enough for tests.
-            if (obj[key]) {
-                propertyreplacer.stub(obj, key);
+    bootstrap: function() {
+
+        var moduleMapper = require('cordova/modulemapper');
+        var channel = require('cordova/channel');
+
+        moduleMapper.clobbers('cordova/exec/proxy', 'cordova.commandProxy');
+
+        channel.onPluginsReady.subscribe(function () {
+            channel.onNativeReady.fire();
+        });
+
+        // FIXME is this the right place to clobber pause/resume? I am guessing not
+        // FIXME pause/resume should be deprecated IN CORDOVA for pagevisiblity api
+        document.addEventListener('webkitvisibilitychange', function() {
+            if (document.webkitHidden) {
+                channel.onPause.fire();
             }
-        };
+            else {
+                channel.onResume.fire();
+            }
+        }, false);
+
+    // End of bootstrap
     }
 };
 
@@ -1857,51 +1219,6 @@ exports.load = function(callback) {
     injectPluginScript(pathPrefix, callback);
 };
 
-
-});
-
-// file: src/test/propertyreplacer.js
-define("cordova/propertyreplacer", function(require, exports, module) {
-
-
-// Use this helper module to stub out properties within Jasmine tests.
-// Original values will be restored after each test.
-
-var curStubs = null;
-
-function removeAllStubs() {
-    for (var i = curStubs.length - 1, stub; stub = curStubs[i]; --i) {
-        stub.obj[stub.key] = stub.value;
-    }
-    curStubs = null;
-}
-
-exports.stub = function(obj, key, value) {
-    if (!curStubs) {
-        curStubs = [];
-        jasmine.getEnv().currentSpec.after(removeAllStubs);
-    }
-
-    curStubs.push({
-        obj: obj,
-        key: key,
-        value: obj[key]
-    });
-    obj[key] = value;
-};
-
-
-});
-
-// file: src/test/testmodule.js
-define("cordova/testmodule", function(require, exports, module) {
-
-module.exports = {
-    func: function() {},
-    num: 2,
-    obj: { str: 'hello' },
-    subObj: { str: 'testSubObj' }
-};
 
 });
 
